@@ -97,10 +97,13 @@ jobs:
           while IFS= read -r file; do
             SERVICE=$(basename "$file" | sed 's/-openapi\.ya\?ml//')
 
-            VERSION=$(grep -A 1 "^info:" "$file" \
-              | grep "version:" \
-              | sed 's/.*version: *"\?\([^"]*\)"\?/\1/' \
-              | tr -d ' ')
+            VERSION=$(grep -E '^[[:space:]]*version:' "$file" \
+              | head -n 1 \
+              | sed 's/^[^:]*:[[:space:]]*//')
+            if [ -z "$VERSION" ]; then
+              echo "❌ ERROR: info.version is missing in $file"
+              exit 1
+            fi
 
             echo "Generating SDKs for $SERVICE (version $VERSION)"
 
