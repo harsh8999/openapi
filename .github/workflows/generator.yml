@@ -89,7 +89,7 @@ jobs:
           else
             git diff --name-status "$BEFORE" "${{ github.sha }}" \
               | awk '$1 != "D" { print $2 }' \
-              | grep "services/.*/openapi.yaml" > changed_files.txt || true
+              | grep "services/.*/.*openapi.*\.ya\?ml" > changed_files.txt || true
           fi
       
           if [ ! -s changed_files.txt ]; then
