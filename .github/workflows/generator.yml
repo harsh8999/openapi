@@ -43,10 +43,14 @@ jobs:
         run: |
           echo "Before SHA : ${{ github.event.before }}"
           echo "Current SHA: ${{ github.sha }}"
-          echo "---- git diff --name-status ----"
-          git diff --name-status ${{ github.event.before }} ${{ github.sha }} || true
-          echo "---- git diff --name-only ----"
-          git diff --name-only ${{ github.event.before }} ${{ github.sha }} || true
+      
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "First push detected – skipping git diff"
+            git ls-files
+          else
+            git diff --name-status ${{ github.event.before }} ${{ github.sha }}
+            git diff --name-only ${{ github.event.before }} ${{ github.sha }}
+          fi
 
       # ========================================================================
       # STEP 2: Setup Java Environment
@@ -76,20 +80,23 @@ jobs:
       - name: Detect changed OpenAPI files
         id: changes
         run: |
-          echo "Detecting changed OpenAPI files..."
-          
-          # Compare current commit with previous commit
-          # Filter out deleted files (status 'D') and find openapi.yaml files
-          git diff --name-status ${{ github.event.before }} ${{ github.sha }} \
-          | awk '$1 != "D" { print $2 }' \
-          | grep "services/.*/openapi.yaml" > changed_files.txt || true
-          
-          # Check if any files were found
+          echo "Detecting OpenAPI changes..."
+          BEFORE="${{ github.event.before }}"
+      
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "First push → taking all OpenAPI files"
+            git ls-files "services/**/openapi.yaml" > changed_files.txt
+          else
+            git diff --name-status "$BEFORE" "${{ github.sha }}" \
+              | awk '$1 != "D" { print $2 }' \
+              | grep "services/.*/openapi.yaml" > changed_files.txt || true
+          fi
+      
           if [ ! -s changed_files.txt ]; then
             echo "No OpenAPI files changed"
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "Changed files:"
+            echo "OpenAPI files:"
             cat changed_files.txt
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
