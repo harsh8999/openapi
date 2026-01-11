@@ -20,34 +20,34 @@ jobs:
       packages: write
 
     steps:
-      # ======================================================================
+      # ----------------------------------------------------------------------
       # STEP 1: Checkout repository
-      # ======================================================================
+      # ----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      # ======================================================================
+      # ----------------------------------------------------------------------
       # STEP 2: Setup Java
-      # ======================================================================
+      # ----------------------------------------------------------------------
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           java-version: "21"
           distribution: temurin
 
-      # ======================================================================
+      # ----------------------------------------------------------------------
       # STEP 3: Install OpenAPI Generator
-      # ======================================================================
+      # ----------------------------------------------------------------------
       - name: Install OpenAPI Generator CLI
         run: |
           npm install -g @openapitools/openapi-generator-cli
           openapi-generator-cli version
 
-      # ======================================================================
+      # ----------------------------------------------------------------------
       # STEP 4: Detect changed OpenAPI files
-      # ======================================================================
+      # ----------------------------------------------------------------------
       - name: Detect changed OpenAPI files
         id: changes
         run: |
@@ -55,57 +55,50 @@ jobs:
           BEFORE="${{ github.event.before }}"
 
           if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE" ]; then
-            echo "First push detected – taking all OpenAPI files"
             git ls-files "services/*/*-openapi.y*ml" > changed_files.txt
           else
-            git diff --name-status "$BEFORE" "${{ github.sha }}" \
-              | awk '$1 != "D" { print $2 }' \
+            git diff --name-only "$BEFORE" "${{ github.sha }}" \
               | grep -E "^services/[^/]+/[^/]+-openapi\.ya?ml$" \
               > changed_files.txt || true
           fi
 
           if [ ! -s changed_files.txt ]; then
-            echo "No OpenAPI files changed"
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "OpenAPI files detected:"
             cat changed_files.txt
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
 
-      # ======================================================================
+      # ----------------------------------------------------------------------
       # STEP 5: Validate OpenAPI specs
-      # ======================================================================
-      - name: Validate OpenAPI specifications
+      # ----------------------------------------------------------------------
+      - name: Validate OpenAPI specs
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           npm install -g @apidevtools/swagger-cli
-          while IFS= read -r file; do
-            echo "Validating $file"
+          while read file; do
             swagger-cli validate "$file"
           done < changed_files.txt
 
-      # ======================================================================
-      # STEP 6: Generate SDKs (Java 8, 11, 17, 21)
-      # ======================================================================
+      # ----------------------------------------------------------------------
+      # STEP 6: Generate Java SDKs (8, 11, 17, 21)
+      # ----------------------------------------------------------------------
       - name: Generate Java SDKs
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           mkdir -p generated
           JAVA_VERSIONS=("8" "11" "17" "21")
 
-          while IFS= read -r file; do
+          while read file; do
             SERVICE=$(basename "$file" | sed 's/-openapi\.ya\?ml//')
 
-            VERSION=$(grep -E '^[[:space:]]*version:' "$file" \
-              | head -n 1 \
-              | sed 's/^[^:]*:[[:space:]]*//')
+            VERSION=$(grep -E '^[[:space:]]*version:' "$file" | head -n1 | awk '{print $2}')
             if [ -z "$VERSION" ]; then
-              echo "❌ ERROR: info.version is missing in $file"
+              echo "❌ info.version missing in $file"
               exit 1
             fi
 
-            echo "Generating SDKs for $SERVICE (version $VERSION)"
+            echo "Generating SDKs for $SERVICE v$VERSION"
 
             for JAVA_VER in "${JAVA_VERSIONS[@]}"; do
               if [ "$JAVA_VER" = "8" ]; then
@@ -122,9 +115,9 @@ jobs:
             done
           done < changed_files.txt
 
-      # ======================================================================
-      # STEP 7: Configure Maven settings
-      # ======================================================================
+      # ----------------------------------------------------------------------
+      # STEP 7: Configure Maven auth
+      # ----------------------------------------------------------------------
       - name: Configure Maven settings
         if: steps.changes.outputs.has_changes == 'true'
         run: |
@@ -141,9 +134,9 @@ jobs:
           </settings>
           EOF
 
-      # ======================================================================
-      # STEP 8: Publish SDKs to GitHub Packages
-      # ======================================================================
+      # ----------------------------------------------------------------------
+      # STEP 8: Build & Publish SDKs (FIXED)
+      # ----------------------------------------------------------------------
       - name: Build & Publish SDKs
         if: steps.changes.outputs.has_changes == 'true'
         env:
@@ -152,29 +145,22 @@ jobs:
           for dir in generated/*; do
             echo "Publishing $(basename "$dir")"
             cd "$dir"
-            mvn clean deploy -DskipTests -Drevision=$(grep -m1 '<version>' pom.xml | sed 's/.*>\(.*\)<.*/\1/')
+
+            mvn clean deploy -DskipTests \
+              -DaltDeploymentRepository=github::https://maven.pkg.github.com/${{ github.repository }}
+
             cd -
           done
 
-      # ======================================================================
+      # ----------------------------------------------------------------------
       # STEP 9: Summary
-      # ======================================================================
+      # ----------------------------------------------------------------------
       - name: Summary
         if: steps.changes.outputs.has_changes == 'true'
         run: |
-          echo "## 🚀 SDK Generation Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          while IFS= read -r file; do
+          echo "## 🚀 SDKs Published to GitHub Packages" >> $GITHUB_STEP_SUMMARY
+          while read file; do
             SERVICE=$(basename "$file" | sed 's/-openapi\.ya\?ml//')
-            VERSION=$(grep -A 1 "^info:" "$file" | grep "version:" | sed 's/.*version: *"\?\([^"]*\)"\?/\1/')
-
-            echo "### 📦 $SERVICE (v$VERSION)" >> $GITHUB_STEP_SUMMARY
-            echo "| Java | Artifact |" >> $GITHUB_STEP_SUMMARY
-            echo "|------|----------|" >> $GITHUB_STEP_SUMMARY
-            echo "| 8 | ${SERVICE}-sdk-java8 |" >> $GITHUB_STEP_SUMMARY
-            echo "| 11 | ${SERVICE}-sdk-java11 |" >> $GITHUB_STEP_SUMMARY
-            echo "| 17 | ${SERVICE}-sdk-java17 |" >> $GITHUB_STEP_SUMMARY
-            echo "| 21 | ${SERVICE}-sdk-java21 |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            VERSION=$(grep -E '^[[:space:]]*version:' "$file" | awk '{print $2}')
+            echo "- **$SERVICE** → v$VERSION (Java 8 / 11 / 17 / 21)" >> $GITHUB_STEP_SUMMARY
           done < changed_files.txt
