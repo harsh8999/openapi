@@ -1,311 +1,177 @@
 # ============================================================================
 # GitHub Actions Workflow: Generate & Publish Java SDKs
-# ============================================================================
-# This workflow automatically generates Java SDKs from OpenAPI specifications
-# for multiple Java versions (8, 11, 17, 21) and publishes them to GitHub Packages.
-#
-# Workflow Triggers:
-# - Push to 'main' branch (when OpenAPI files change)
-# - Manual trigger via GitHub Actions UI
+# Convention:
+# services/{service-name}/{service-name}-openapi.yaml
 # ============================================================================
 
 name: Generate & Publish Java SDKs
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:  # Allows manual triggering from GitHub UI
+    branches: ["main"]
+  workflow_dispatch:
 
 jobs:
   generate-and-publish:
     runs-on: ubuntu-latest
-    
-    # Required permissions for GitHub Packages
+
     permissions:
-      contents: read      # Read repository contents
-      packages: write     # Publish to GitHub Packages
+      contents: read
+      packages: write
 
     steps:
-      # ========================================================================
-      # STEP 1: Checkout Repository
-      # ========================================================================
-      # Fetch the repository code with the last 2 commits
-      # (needed to detect which files changed)
+      # ======================================================================
+      # STEP 1: Checkout repository
+      # ======================================================================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2  # Get current and previous commit for diff
-      
-      # ======================================================================
-      # STEP 2: Debug git diff (TEMP – REMOVE LATER)
-      # ======================================================================
-      - name: Debug git diff
-        run: |
-          echo "Before SHA : ${{ github.event.before }}"
-          echo "Current SHA: ${{ github.sha }}"
-      
-          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
-            echo "First push detected – skipping git diff"
-            git ls-files
-          else
-            git diff --name-status ${{ github.event.before }} ${{ github.sha }}
-            git diff --name-only ${{ github.event.before }} ${{ github.sha }}
-          fi
+          fetch-depth: 2
 
-      # ========================================================================
-      # STEP 2: Setup Java Environment
-      # ========================================================================
-      # Install Java 21 for building the SDKs
-      # (Java 21 can build for all target versions: 8, 11, 17, 21)
+      # ======================================================================
+      # STEP 2: Setup Java
+      # ======================================================================
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
-          distribution: 'temurin'  # Eclipse Temurin (AdoptOpenJDK)
+          java-version: "21"
+          distribution: temurin
 
-      # ========================================================================
-      # STEP 3: Install OpenAPI Generator CLI
-      # ========================================================================
-      # Install the OpenAPI Generator tool globally via npm
+      # ======================================================================
+      # STEP 3: Install OpenAPI Generator
+      # ======================================================================
       - name: Install OpenAPI Generator CLI
         run: |
           npm install -g @openapitools/openapi-generator-cli
-          openapi-generator-cli version  # Verify installation
+          openapi-generator-cli version
 
-      # ========================================================================
-      # STEP 4: Detect Changed OpenAPI Files
-      # ========================================================================
-      # Find which OpenAPI specification files were modified in this push
-      # Only process changed files to optimize build time
+      # ======================================================================
+      # STEP 4: Detect changed OpenAPI files
+      # ======================================================================
       - name: Detect changed OpenAPI files
         id: changes
         run: |
           echo "Detecting OpenAPI changes..."
           BEFORE="${{ github.event.before }}"
-      
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            echo "First push → taking all OpenAPI files"
-            git ls-files "services/**/openapi.yaml" > changed_files.txt
+
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE" ]; then
+            echo "First push detected – taking all OpenAPI files"
+            git ls-files "services/*/*-openapi.y*ml" > changed_files.txt
           else
             git diff --name-status "$BEFORE" "${{ github.sha }}" \
               | awk '$1 != "D" { print $2 }' \
-              | grep "services/.*/.*openapi.*\.ya\?ml" > changed_files.txt || true
+              | grep -E "^services/[^/]+/[^/]+-openapi\.ya?ml$" \
+              > changed_files.txt || true
           fi
-      
+
           if [ ! -s changed_files.txt ]; then
             echo "No OpenAPI files changed"
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "OpenAPI files:"
+            echo "OpenAPI files detected:"
             cat changed_files.txt
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
 
-      # ========================================================================
-      # STEP 5: Validate OpenAPI Specifications
-      # ========================================================================
-      # Validate each changed OpenAPI spec for syntax errors and compliance
-      # This catches errors before attempting SDK generation
+      # ======================================================================
+      # STEP 5: Validate OpenAPI specs
+      # ======================================================================
       - name: Validate OpenAPI specifications
         if: steps.changes.outputs.has_changes == 'true'
         run: |
-          # Install swagger-cli for validation
           npm install -g @apidevtools/swagger-cli
-          
-          # Validate each changed file
           while IFS= read -r file; do
-            [ -f "$file" ] || continue  # Skip if file doesn't exist
-            echo "Validating $file..."
+            echo "Validating $file"
             swagger-cli validate "$file"
           done < changed_files.txt
 
-      # ========================================================================
-      # STEP 6: Generate SDKs for Multiple Java Versions
-      # ========================================================================
-      # Generate Java client SDKs for Java 8, 11, 17, and 21
-      # Each version uses appropriate configurations and dependencies
-      - name: Generate SDKs for Java 8, 11, 17, and 21
+      # ======================================================================
+      # STEP 6: Generate SDKs (Java 8, 11, 17, 21)
+      # ======================================================================
+      - name: Generate Java SDKs
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           mkdir -p generated
-          
-          # Define all Java versions to generate SDKs for
           JAVA_VERSIONS=("8" "11" "17" "21")
-          
-          # Process each changed OpenAPI file
+
           while IFS= read -r file; do
-            # Extract service name from file path
-            # Example: services/user-service/openapi.yaml -> user-service
-            SERVICE=$(echo "$file" | sed 's|services/\(.*\)/openapi.yaml|\1|')
-            echo "Generating SDKs for $SERVICE..."
-            
-            # Extract API version from the OpenAPI spec
-            VERSION=$(grep -A 1 "^info:" "$file" | grep "version:" | sed 's/.*version: *"\?\([^"]*\)"\?/\1/' | tr -d ' ')
-            echo "Version: $VERSION"
-            
-            # Generate SDK for each Java version
+            SERVICE=$(basename "$file" | sed 's/-openapi\.ya\?ml//')
+
+            VERSION=$(grep -A 1 "^info:" "$file" \
+              | grep "version:" \
+              | sed 's/.*version: *"\?\([^"]*\)"\?/\1/' \
+              | tr -d ' ')
+
+            echo "Generating SDKs for $SERVICE (version $VERSION)"
+
             for JAVA_VER in "${JAVA_VERSIONS[@]}"; do
-              echo "  → Generating for Java $JAVA_VER..."
-              
-              # Configure Java version-specific properties
               if [ "$JAVA_VER" = "8" ]; then
-                # Java 8: Use java8 date library and Jersey 2 HTTP client
-                JAVA_PROPS="java8=true,dateLibrary=java8,library=jersey2"
-                SOURCE_TARGET="1.8"
-              elif [ "$JAVA_VER" = "11" ]; then
-                # Java 11: Modern features with Jersey 2
-                JAVA_PROPS="java8=false,dateLibrary=java8,library=jersey2"
-                SOURCE_TARGET="11"
-              elif [ "$JAVA_VER" = "17" ]; then
-                # Java 17 LTS: Latest LTS features
-                JAVA_PROPS="java8=false,dateLibrary=java8,library=jersey2"
-                SOURCE_TARGET="17"
-              else  # Java 21
-                # Java 21 LTS: Latest features
-                JAVA_PROPS="java8=false,dateLibrary=java8,library=jersey2"
-                SOURCE_TARGET="21"
+                PROPS="java8=true,dateLibrary=java8,library=jersey2"
+              else
+                PROPS="java8=false,dateLibrary=java8,library=jersey2"
               fi
-              
-              # Generate the Java SDK
-              # Group ID structure: com.harsh.openapi.{service-name}
-              # Artifact ID: {service-name}-sdk-java{version}
+
               openapi-generator-cli generate \
                 -i "$file" \
                 -g java \
                 -o "generated/${SERVICE}-java${JAVA_VER}" \
-                --additional-properties=groupId=com.harsh.openapi.${SERVICE},artifactId=${SERVICE}-sdk-java${JAVA_VER},artifactVersion=${VERSION},${JAVA_PROPS},hideGenerationTimestamp=true,sourceFolder=src/main/java
-              
-              echo "  ✓ Generated ${SERVICE}-sdk-java${JAVA_VER} (version $VERSION)"
+                --additional-properties=groupId=com.harsh.openapi.${SERVICE},artifactId=${SERVICE}-sdk-java${JAVA_VER},artifactVersion=${VERSION},${PROPS},hideGenerationTimestamp=true
             done
           done < changed_files.txt
 
-      # ========================================================================
-      # STEP 7: Configure Maven Settings
-      # ========================================================================
-      # Create Maven settings.xml with GitHub Packages authentication
-      # Uses GitHub token for publishing artifacts
+      # ======================================================================
+      # STEP 7: Configure Maven settings
+      # ======================================================================
       - name: Configure Maven settings
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml << 'EOF'
-          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                                        https://maven.apache.org/xsd/settings-1.0.0.xsd">
+          cat > ~/.m2/settings.xml <<EOF
+          <settings>
             <servers>
               <server>
                 <id>github</id>
-                <username>${env.GITHUB_ACTOR}</username>
-                <password>${env.GITHUB_TOKEN}</password>
+                <username>${GITHUB_ACTOR}</username>
+                <password>${GITHUB_TOKEN}</password>
               </server>
             </servers>
           </settings>
           EOF
 
-      # ========================================================================
-      # STEP 8: Update POM Files for GitHub Packages
-      # ========================================================================
-      # Add distribution management configuration to each generated POM
-      # This tells Maven where to publish the artifacts
-      - name: Update POM for GitHub Packages
-        if: steps.changes.outputs.has_changes == 'true'
-        run: |
-          for dir in generated/*; do
-            if [ -d "$dir" ]; then
-              SERVICE=$(basename "$dir")
-              echo "Updating POM for $SERVICE..."
-              
-              # Inject distribution management section into pom.xml
-              # This configures GitHub Packages as the deployment target
-              sed -i '/<\/project>/i \
-              <distributionManagement>\
-                <repository>\
-                  <id>github</id>\
-                  <name>GitHub Packages</name>\
-                  <url>https://maven.pkg.github.com/${{ github.repository }}</url>\
-                </repository>\
-              </distributionManagement>' "$dir/pom.xml"
-            fi
-          done
-
-      # ========================================================================
-      # STEP 9: Build and Publish SDKs
-      # ========================================================================
-      # Compile each SDK and publish to GitHub Packages
-      # Uses 'mvn deploy' to build and upload artifacts
-      - name: Build and Publish SDKs
+      # ======================================================================
+      # STEP 8: Publish SDKs to GitHub Packages
+      # ======================================================================
+      - name: Build & Publish SDKs
         if: steps.changes.outputs.has_changes == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for dir in generated/*; do
-            if [ -d "$dir" ]; then
-              SERVICE=$(basename "$dir")
-              echo "Building and publishing $SERVICE..."
-              
-              cd "$dir"
-              # Build and deploy to GitHub Packages
-              # -DskipTests: Skip running tests for faster deployment
-              mvn clean deploy -DskipTests
-              cd -
-              
-              echo "✅ Published $SERVICE SDK"
-            fi
+            echo "Publishing $(basename "$dir")"
+            cd "$dir"
+            mvn clean deploy -DskipTests
+            cd -
           done
 
-      # ========================================================================
-      # STEP 10: Generate Summary Report
-      # ========================================================================
-      # Create a detailed summary in the GitHub Actions UI
-      # Shows all generated SDKs and usage examples
+      # ======================================================================
+      # STEP 9: Summary
+      # ======================================================================
       - name: Summary
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           echo "## 🚀 SDK Generation Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "The following SDKs were generated and published:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Create a table for each service showing all Java versions
+
           while IFS= read -r file; do
-            SERVICE=$(echo "$file" | sed 's|services/\(.*\)/openapi.yaml|\1|')
-            VERSION=$(grep -A 1 "^info:" "$file" | grep "version:" | sed 's/.*version: *"\?\([^"]*\)"\?/\1/' | tr -d ' ')
+            SERVICE=$(basename "$file" | sed 's/-openapi\.ya\?ml//')
+            VERSION=$(grep -A 1 "^info:" "$file" | grep "version:" | sed 's/.*version: *"\?\([^"]*\)"\?/\1/')
+
             echo "### 📦 $SERVICE (v$VERSION)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Java Version | Artifact ID | Group ID |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------------|-------------|----------|" >> $GITHUB_STEP_SUMMARY
-            echo "| Java 8 | \`${SERVICE}-sdk-java8\` | \`com.harsh.openapi.${SERVICE}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| Java 11 | \`${SERVICE}-sdk-java11\` | \`com.harsh.openapi.${SERVICE}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| Java 17 | \`${SERVICE}-sdk-java17\` | \`com.harsh.openapi.${SERVICE}\` |" >> $GITHUB_STEP_SUMMARY
-            echo "| Java 21 | \`${SERVICE}-sdk-java21\` | \`com.harsh.openapi.${SERVICE}\` |" >> $GITHUB_STEP_SUMMARY
+            echo "| Java | Artifact |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|----------|" >> $GITHUB_STEP_SUMMARY
+            echo "| 8 | ${SERVICE}-sdk-java8 |" >> $GITHUB_STEP_SUMMARY
+            echo "| 11 | ${SERVICE}-sdk-java11 |" >> $GITHUB_STEP_SUMMARY
+            echo "| 17 | ${SERVICE}-sdk-java17 |" >> $GITHUB_STEP_SUMMARY
+            echo "| 21 | ${SERVICE}-sdk-java21 |" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           done < changed_files.txt
-          
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📖 Usage Example" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Show example Maven dependency configuration
-          FIRST_SERVICE=$(head -n 1 changed_files.txt | sed 's|services/\(.*\)/openapi.yaml|\1|')
-          FIRST_VERSION=$(head -n 1 changed_files.txt | xargs -I {} sh -c 'grep -A 1 "^info:" {} | grep "version:" | sed "s/.*version: *\"\?\([^\"]*\)\"\?/\1/" | tr -d " "')
-          
-          echo "Add to your \`pom.xml\`:" >> $GITHUB_STEP_SUMMARY
-          echo '```xml' >> $GITHUB_STEP_SUMMARY
-          echo "<dependency>" >> $GITHUB_STEP_SUMMARY
-          echo "  <groupId>com.harsh.openapi.${FIRST_SERVICE}</groupId>" >> $GITHUB_STEP_SUMMARY
-          echo "  <artifactId>${FIRST_SERVICE}-sdk-java17</artifactId>" >> $GITHUB_STEP_SUMMARY
-          echo "  <version>${FIRST_VERSION}</version>" >> $GITHUB_STEP_SUMMARY
-          echo "</dependency>" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Don't forget to add the GitHub Packages repository:" >> $GITHUB_STEP_SUMMARY
-          echo '```xml' >> $GITHUB_STEP_SUMMARY
-          echo "<repositories>" >> $GITHUB_STEP_SUMMARY
-          echo "  <repository>" >> $GITHUB_STEP_SUMMARY
-          echo "    <id>github</id>" >> $GITHUB_STEP_SUMMARY
-          echo "    <url>https://maven.pkg.github.com/${{ github.repository }}</url>" >> $GITHUB_STEP_SUMMARY
-          echo "  </repository>" >> $GITHUB_STEP_SUMMARY
-          echo "</repositories>" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
