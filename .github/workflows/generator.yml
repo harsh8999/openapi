@@ -152,7 +152,7 @@ jobs:
           for dir in generated/*; do
             echo "Publishing $(basename "$dir")"
             cd "$dir"
-            mvn clean deploy -DskipTests
+            mvn clean deploy -DskipTests -Drevision=$(grep -m1 '<version>' pom.xml | sed 's/.*>\(.*\)<.*/\1/')
             cd -
           done
 
